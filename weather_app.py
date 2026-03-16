@@ -327,21 +327,36 @@ def load_weather(start, end):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_prices(start, end):
-    """Scarica prezzi NG=F e XLE da yfinance."""
+    """Scarica prezzi NG=F e XLE da yfinance — robusto per MultiIndex."""
     import yfinance as yf
     frames = []
     for ticker, name in [('NG=F', 'TTF_GAS'), ('XLE', 'ENERGY_EQ')]:
-        df = yf.download(ticker, start=start, end=end,
-                         auto_adjust=True, progress=False)
-        if df.empty:
+        try:
+            df = yf.download(ticker, start=start, end=end,
+                             auto_adjust=True, progress=False)
+            if df.empty:
+                continue
+            # Gestisci MultiIndex (yfinance >= 0.2.x restituisce colonne multilivello)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(1)
+            if 'Close' in df.columns:
+                df = df[['Close']].copy()
+                df.columns = ['close']
+            elif 'close' in df.columns:
+                df = df[['close']].copy()
+            else:
+                continue
+            df.index.name = 'date'
+            df = df.reset_index()
+            df['ticker'] = name
+            df['date'] = pd.to_datetime(df['date'])
+            df['close'] = pd.to_numeric(df['close'], errors='coerce')
+            df = df.dropna(subset=['close'])
+            frames.append(df)
+        except Exception:
             continue
-        df = df[['Close']].copy()
-        df.columns = ['close']
-        df.index.name = 'date'
-        df = df.reset_index()
-        df['ticker'] = name
-        df['date'] = pd.to_datetime(df['date'])
-        frames.append(df)
+    if not frames:
+        return pd.DataFrame(columns=['date','close','ticker','ret_1d'])
     prices = pd.concat(frames, ignore_index=True).sort_values(['ticker','date'])
     prices['ret_1d'] = prices.groupby('ticker')['close'].transform(
         lambda x: np.log(x / x.shift(1))
